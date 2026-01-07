@@ -1,0 +1,1 @@
+** name ADRs for Download ADR-nnnn- (like ADR-0001-provider-plugin-architecture.md)
