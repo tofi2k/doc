@@ -54,6 +54,7 @@ Out of scope for MVP:
 * External providers are integrated asynchronously
 * Multi-tenancy is enforced at application level
 * No shared credentials across reseller boundaries
+* Provider integration must be protocol-agnostic (REST, SOAP, CSV, SDK, etc.)
 
 ---
 
@@ -80,20 +81,24 @@ flowchart LR
     UI[Web UI] --> API[Hostingmaster API]
     API --> Pricing
     API --> OrderSvc
-    OrderSvc --> ProviderConnector
-    ProviderConnector --> ExternalProvider
+    OrderSvc --> ProviderIntegration
+    ProviderIntegration --> ExternalProvider
     API --> MongoDB
 ```
+
+**ProviderIntegration** represents the bounded integration layer responsible for all external provider communication.
 
 ---
 
 # 4. Solution Strategy
 
 * Modular services with clear responsibilities
-* Provider abstraction via connector pattern
+* **Capability-based provider plugin architecture**
+* Strict separation of provisioning and pricing
 * Deterministic pricing engine
 * Asynchronous order processing
 * Explicit lifecycle state machines
+* Provider instability must not impact core stability
 
 ---
 
@@ -106,7 +111,7 @@ flowchart TB
     API --> PricingService
     API --> OrderService
     OrderService --> WorkflowEngine
-    WorkflowEngine --> ProviderConnector
+    WorkflowEngine --> ProviderIntegrationBoundary
     API --> MongoDB
 ```
 
@@ -116,8 +121,26 @@ flowchart TB
 * Pricing Service
 * Order Service
 * Workflow Engine
-* Provider Connectors
+* **Provider Integration Boundary**
 * MongoDB
+
+---
+
+### Provider Integration Boundary
+
+Responsibility:
+
+* Acts as the **sole integration boundary** to all external providers
+* Encapsulates provider-specific protocols, APIs, formats and quirks
+* Exposes a **uniform, versioned runtime contract** to the core
+
+Contained logical components:
+
+* Plugin Registry (installed provider plugins and metadata)
+* Plugin Runtime (isolatable execution boundary)
+* Provider Plugins (capability adapters)
+
+The core system is **fully protocol-agnostic**.
 
 ---
 
@@ -125,8 +148,11 @@ flowchart TB
 
 Responsibility:
 
-* Price resolution (override, markup, inheritance)
-* Bundle and included-domain handling
+* Deterministic price resolution
+* Explicit price overrides
+* Derived pricing rules (markup / markdown)
+* Inheritance across reseller hierarchy
+* Handling of included-domain benefits
 
 ---
 
@@ -134,48 +160,65 @@ Responsibility:
 
 Responsibility:
 
-* Order creation
+* Order creation and persistence
 * Lifecycle state management
-* Persistence of price breakdowns
+* Tracking of provisioning operations
+* Audit-ready storage of price breakdowns
 
 ---
 
-### Provider Connector
-
-Responsibility:
-
-* Encapsulation of provider-specific APIs
-* Async communication and retries
-
----
-
-## 5.2 Level 2 – Pricing
+## 5.2 Level 2 – Provider Integration Boundary
 
 ```mermaid
-flowchart LR
-    Order --> PriceRules
-    PriceRules --> ParentPrice
-    ParentPrice --> ProviderBase
+flowchart TB
+    Core --> PluginRuntime
+    PluginRuntime --> ProviderPlugin
+    ProviderPlugin --> ExternalProvider
 ```
+
+**Key rule:** The core never communicates directly with external providers.
 
 ---
 
 # 6. Runtime View
 
-## 6.1 Domain Order
+## 6.1 Domain Order (Asynchronous)
 
 ```mermaid
 sequenceDiagram
     participant C as Customer
     participant API
     participant Order
+    participant Plugin
     participant Provider
 
     C->>API: Create Domain Order
     API->>Order: create(order)
-    Order->>Provider: submit registration
-    Provider-->>Order: async status
+    Order->>Plugin: RegisterDomain
+    Plugin-->>Order: OperationRef
+    Order->>Plugin: Poll Operation Status
+    Plugin-->>Order: succeeded / failed
 ```
+
+**Architectural rule:** All provisioning operations are asynchronous and tracked via explicit operation references.
+
+---
+
+## 6.2 Pricing Import
+
+```mermaid
+sequenceDiagram
+    participant Core
+    participant Plugin
+    participant Provider
+
+    Core->>Plugin: SyncPrices
+    Plugin->>Provider: Fetch prices (API/CSV/etc.)
+    Provider-->>Plugin: Raw price data
+    Plugin-->>Core: RawPrices
+```
+
+Raw provider prices are **never exposed directly to customers**.
 
 ---
 
@@ -188,9 +231,10 @@ flowchart TB
     Ingress --> API
     API --> Services
     Services --> MongoDB
+    Services --> PluginRuntime
 ```
 
-Hostingmaster runs fully inside a Kubernetes cluster.
+The Plugin Runtime is logically separable and may be isolated for fault containment.
 
 ---
 
@@ -199,17 +243,32 @@ Hostingmaster runs fully inside a Kubernetes cluster.
 ## 8.1 Multi-Tenancy
 
 * Hierarchical reseller tree
-* Tenant filtering on every query
+* Explicit resellerId on all business entities
+* Tenant filtering enforced server-side
 
-## 8.2 Pricing
+---
 
-* Deterministic rule evaluation
-* Audit-ready price breakdowns
+## 8.2 Provider Plugins & Capabilities
 
-## 8.3 Security
+* Plugins declare explicit capabilities (Domains, SSL, Pricing)
+* Missing capabilities are **valid and expected**
+* UI and workflows are gated based on declared capabilities
 
-* Secrets stored in Kubernetes Secrets (Vault later)
-* No cross-tenant access
+---
+
+## 8.3 Pricing
+
+* Deterministic evaluation order
+* No provider pricing logic in core
+* Full audit trail for every price decision
+
+---
+
+## 8.4 Security
+
+* Provider credentials are referenced, never embedded
+* Plugins must not persist secrets
+* Provider access is limited to reseller scope
 
 ---
 
@@ -223,22 +282,26 @@ Architectural decisions are documented separately as ADRs.
 
 ## Quality Scenarios
 
-* A reseller defines custom prices without affecting parent resellers
-* A provider outage does not block the API
+* A reseller overrides prices without affecting parent or sibling resellers
+* A provider outage does not block API availability
+* A provider without pricing API can still be onboarded
 
 ---
 
 # 11. Risks and Technical Debt
 
-* Provider API inconsistencies
-* Complex pricing rules over time
+* Provider API inconsistency and instability
+* Growing complexity of pricing rules
+* Operational overhead of plugin isolation
 
 ---
 
 # 12. Glossary
 
-| Term      | Definition                   |
-| --------- | ---------------------------- |
-| Reseller  | Tenant that sells services   |
-| Provider  | External domain/SSL supplier |
-| Connector | Adapter to provider API      |
+| Term                          | Definition                                           |
+| ----------------------------- | ---------------------------------------------------- |
+| Reseller                      | Tenant that sells services                           |
+| Provider                      | External domain/SSL supplier                         |
+| Provider Plugin               | Capability-based adapter to an external provider     |
+| Provider Integration Boundary | Architectural boundary isolating provider complexity |
+| OperationRef                  | Reference to an asynchronous provisioning operation  |
